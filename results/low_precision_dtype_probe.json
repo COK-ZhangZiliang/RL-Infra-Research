@@ -1,0 +1,47 @@
+{
+  "config": {
+    "batch": 2,
+    "hidden": 64,
+    "seq_len": 16,
+    "vocab": 128
+  },
+  "device": {
+    "capability": [
+      8,
+      6
+    ],
+    "cuda_version": "13.0",
+    "name": "NVIDIA GeForce RTX 3090",
+    "torch_version": "2.11.0+cu130"
+  },
+  "results": [
+    {
+      "certified_projection_status": "error",
+      "dtype": "float8_e4m3fn",
+      "input_creation_status": "ok",
+      "note": "NotImplementedError('\"addmm_cuda\" not implemented for \\'Float8_e4m3fn\\''); certified=NotImplementedError('\"addmm_cuda\" not implemented for \\'Float8_e4m3fn\\'')",
+      "torch_matmul_status": "error"
+    },
+    {
+      "certified_projection_status": "error",
+      "dtype": "float8_e5m2",
+      "input_creation_status": "ok",
+      "note": "NotImplementedError('\"addmm_cuda\" not implemented for \\'Float8_e5m2\\''); certified=NotImplementedError('\"addmm_cuda\" not implemented for \\'Float8_e5m2\\'')",
+      "torch_matmul_status": "error"
+    },
+    {
+      "certified_projection_status": "error",
+      "dtype": "float8_e4m3fnuz",
+      "input_creation_status": "ok",
+      "note": "NotImplementedError('\"addmm_cuda\" not implemented for \\'Float8_e4m3fnuz\\''); certified=NotImplementedError('\"addmm_cuda\" not implemented for \\'Float8_e4m3fnuz\\'')",
+      "torch_matmul_status": "error"
+    },
+    {
+      "certified_projection_status": "error",
+      "dtype": "float8_e5m2fnuz",
+      "input_creation_status": "ok",
+      "note": "NotImplementedError('\"addmm_cuda\" not implemented for \\'Float8_e5m2fnuz\\''); certified=NotImplementedError('\"addmm_cuda\" not implemented for \\'Float8_e5m2fnuz\\'')",
+      "torch_matmul_status": "error"
+    }
+  ]
+}

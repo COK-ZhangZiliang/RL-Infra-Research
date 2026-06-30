@@ -34,6 +34,25 @@ mean overhead 0.959x. Including FP32+TF32, it is 20/20 batch-invariant.
 
 The stricter torch-single 0-drift fallback remains expensive at about 1.37x.
 
+## Low-Precision Focused Result
+
+For BF16/FP16, a focused rerun shows that strict canonical fallback still adds
+substantial overhead, while `certified_top_projection` keeps the batch-invariant
+contract and routes to the certified torch fast path:
+
+| dtype | strict fallback overhead | certified_top_projection overhead | batch-invariant | speedup vs strict |
+|---|---:|---:|---:|---:|
+| BF16 | 1.370x | 1.010x | 5/5 | 1.455x |
+| FP16 | 1.373x | 1.003x | 5/5 | 1.452x |
+
+At batch 8, the speedup versus strict fallback is 1.589x for BF16 and 1.568x
+for FP16.
+
+FP8 dtype probing on RTX 3090 / PyTorch `2.11.0+cu130` found that float8 tensors
+can be created, but CUDA `addmm` for these float8 dtypes is not implemented in
+the tested path. FP8 is therefore recorded as unsupported for this projection
+benchmark rather than reported as a comparable performance datapoint.
+
 ## Contents
 
 - `docs/batch_invariant_operator_optimization.md`: full methodology, bottleneck
@@ -47,6 +66,10 @@ The stricter torch-single 0-drift fallback remains expensive at about 1.37x.
 - `experiments/validate_certified_top_projection.py`: validation gate.
 - `experiments/tune_canonical_persistent_gemm.py`: candidate Triton GEMM tuning
   probe.
+- `experiments/analyze_low_precision_batch_invariant.py`: BF16/FP16 focused
+  analysis.
+- `experiments/probe_low_precision_dtype_support.py`: FP8/lower-precision dtype
+  support probe.
 - `results/*.md`: generated summary reports.
 
 ## Reproduction Sketch
