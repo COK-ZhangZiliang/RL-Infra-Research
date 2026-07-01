@@ -1,7 +1,7 @@
-# Certified Batch-Invariant Projection for TOP
+# Batch-Invariant Operator Optimization for TOP
 
 This repository contains a compact artifact for a TOP-oriented operator
-optimization study.
+optimization study in Miles/SGLang.
 
 The key question is:
 
@@ -53,6 +53,38 @@ can be created, but CUDA `addmm` for these float8 dtypes is not implemented in
 the tested path. FP8 is therefore recorded as unsupported for this projection
 benchmark rather than reported as a comparable performance datapoint.
 
+## Registered Operator Extension
+
+The artifact now also covers the CUDA operators registered by SGLang's
+batch-invariant mode, plus TP-invariant communication/reduction helpers:
+
+- `mm`, `addmm`, optional `bmm`
+- `_log_softmax`, last-dim `mean`, `rms_norm`
+- TP row-linear kernels
+- MoE tree reduce variants
+- deterministic TP tree all-reduce
+
+The current code-level optimization is captured as a source patch:
+
+- `patches/sglang_batch_invariant_rowwise_vectorized.patch`
+
+It changes the row-wise BIV reductions from fixed-1024 chunked loops to
+shape-specialized vectorized row Triton kernels for `log_softmax`, last-dim
+`mean`, and `rms_norm`, with a default vectorized threshold of 8192 columns.
+
+Real GPU registered-operator results are summarized in:
+
+- `results/registered_batch_invariant_operator_analysis_real.md`
+- `results/tp_invariant_all_reduce_analysis_real.md`
+- `results/batch_invariant_operator_coverage_real.md`
+
+Key measured result: the optimized row-wise kernels remain bitwise
+batch-invariant across the measured rows. `log_softmax` and `rms_norm` improve
+over the legacy chunked kernels on average, while `mean` is shape-sensitive.
+The benchmark also identifies invalid or incomplete fast paths, including
+`moe_sum_tree_reduce_v2` on some topk=10 shapes and `tp_inv_optim` for
+FP16/BF16 on RTX 3090.
+
 ## Contents
 
 - `docs/batch_invariant_operator_optimization.md`: full methodology, bottleneck
@@ -70,7 +102,19 @@ benchmark rather than reported as a comparable performance datapoint.
   analysis.
 - `experiments/probe_low_precision_dtype_support.py`: FP8/lower-precision dtype
   support probe.
+- `experiments/benchmark_registered_batch_invariant_ops.py`: registered BIV
+  operator benchmark harness.
+- `experiments/analyze_registered_batch_invariant_ops.py`: registered operator
+  report generator.
+- `experiments/benchmark_tp_invariant_all_reduce.py`: distributed TP
+  deterministic all-reduce benchmark.
+- `experiments/analyze_tp_invariant_all_reduce.py`: all-reduce report
+  generator.
+- `experiments/audit_batch_invariant_operator_coverage.py`: source coverage
+  audit for registered/exported BIV operators.
+- `experiments/run_batch_invariant_operator_suite.sh`: end-to-end suite runner.
 - `results/*.md`: generated summary reports.
+- `patches/*.patch`: source patches against the measured SGLang checkout.
 
 ## Reproduction Sketch
 
