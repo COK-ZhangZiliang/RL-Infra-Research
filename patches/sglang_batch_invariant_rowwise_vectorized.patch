@@ -1,0 +1,272 @@
+diff --git a/python/sglang/srt/batch_invariant_ops/batch_invariant_ops.py b/python/sglang/srt/batch_invariant_ops/batch_invariant_ops.py
+index 51a911e..5713ac8 100644
+--- a/python/sglang/srt/batch_invariant_ops/batch_invariant_ops.py
++++ b/python/sglang/srt/batch_invariant_ops/batch_invariant_ops.py
+@@ -1,6 +1,7 @@
+ # Adapted from https://github.com/thinking-machines-lab/batch_invariant_ops/blob/main/batch_invariant_ops/batch_invariant_ops.py
+ 
+ import contextlib
++import os
+ from collections import namedtuple
+ from collections.abc import Callable
+ from typing import Any, Dict, Tuple
+@@ -36,6 +37,27 @@ _ENABLE_MM_COMPARISON_TEST = get_bool_env_var(
+     "SGLANG_BATCH_INVARIANT_OPS_ENABLE_MM_COMPARISON_TEST"
+ )
+ 
++
++def _get_int_env(name: str, default: int) -> int:
++    raw_value = os.getenv(name)
++    if raw_value is None:
++        return default
++    try:
++        value = int(raw_value)
++    except ValueError:
++        print(f"Invalid {name}={raw_value!r}; using {default}.")
++        return default
++    if value <= 0:
++        print(f"Invalid {name}={raw_value!r}; using {default}.")
++        return default
++    return value
++
++
++_MAX_VECTORIZED_ROWWISE_BLOCK_SIZE = _get_int_env(
++    "SGLANG_BATCH_INVARIANT_OPS_MAX_VECTORIZED_ROWWISE_BLOCK_SIZE",
++    8192,
++)
++
+ if not _ENABLE_MM_DEEPGEMM:
+     print("Disable DeepGEMM in batch invariant ops. Performance may be suboptimal.")
+ 
+@@ -315,6 +337,41 @@ def matmul_persistent(
+     return _matmul_persistent_triton(a=a, b=b, bias=bias)
+ 
+ 
++def _next_power_of_2(x: int) -> int:
++    return 1 << (x - 1).bit_length()
++
++
++def _rowwise_num_warps(block_size: int) -> int:
++    if block_size >= 8192:
++        return 8
++    if block_size >= 2048:
++        return 4
++    return 1
++
++
++@triton.jit
++def _log_softmax_row_kernel(
++    input_ptr,
++    output_ptr,
++    input_row_stride: tl.constexpr,
++    output_row_stride: tl.constexpr,
++    n_cols: tl.constexpr,
++    BLOCK_SIZE: tl.constexpr,
++):
++    row_idx = tl.program_id(0).to(tl.int64)
++    offsets = tl.arange(0, BLOCK_SIZE)
++    mask = offsets < n_cols
++    input_row = input_ptr + row_idx * input_row_stride
++    output_row = output_ptr + row_idx * output_row_stride
++
++    vals = tl.load(input_row + offsets, mask=mask, other=-float("inf")).to(tl.float32)
++    row_max = tl.max(vals, axis=0)
++    exp_vals = tl.exp(vals - row_max)
++    denom = tl.sum(tl.where(mask, exp_vals, 0.0), axis=0)
++    out = vals - row_max - tl.log(denom)
++    tl.store(output_row + offsets, out, mask=mask)
++
++
+ @triton.jit
+ def _log_softmax_kernel(
+     input_ptr,
+@@ -414,23 +471,53 @@ def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
+     # Allocate output tensor
+     output = torch.empty_like(input_2d)
+ 
+-    # Choose block size based on the number of columns
+-    BLOCK_SIZE = 1024
+-
+-    # Launch kernel with one block per row
+     grid = (n_rows,)
+-    _log_softmax_kernel[grid](
+-        input_2d,
+-        output,
+-        input_2d.stride(0),
+-        output.stride(0),
+-        n_cols,
+-        BLOCK_SIZE=BLOCK_SIZE,
+-    )
++    if n_cols <= _MAX_VECTORIZED_ROWWISE_BLOCK_SIZE:
++        block_size = _next_power_of_2(n_cols)
++        num_warps = _rowwise_num_warps(block_size)
++        _log_softmax_row_kernel[grid](
++            input_2d,
++            output,
++            input_2d.stride(0),
++            output.stride(0),
++            n_cols,
++            BLOCK_SIZE=block_size,
++            num_warps=num_warps,
++        )
++    else:
++        _log_softmax_kernel[grid](
++            input_2d,
++            output,
++            input_2d.stride(0),
++            output.stride(0),
++            n_cols,
++            BLOCK_SIZE=1024,
++        )
+     # Reshape output back to original shape
+     return output.reshape(original_shape)
+ 
+ 
++@triton.jit
++def _mean_last_dim_kernel(
++    input_ptr,
++    output_ptr,
++    input_row_stride: tl.constexpr,
++    input_col_stride: tl.constexpr,
++    N: tl.constexpr,
++    BLOCK_SIZE: tl.constexpr,
++):
++    row_idx = tl.program_id(0).to(tl.int64)
++    offsets = tl.arange(0, BLOCK_SIZE)
++    mask = offsets < N
++    vals = tl.load(
++        input_ptr + row_idx * input_row_stride + offsets * input_col_stride,
++        mask=mask,
++        other=0.0,
++    ).to(tl.float32)
++    mean_val = tl.sum(tl.where(mask, vals, 0.0), axis=0) / N
++    tl.store(output_ptr + row_idx, mean_val)
++
++
+ @triton.jit
+ def mean_kernel(
+     input_ptr,
+@@ -555,21 +642,32 @@ def mean_dim(
+ 
+     # Launch kernel
+     grid = (M * K,)
+-    BLOCK_SIZE = 1024
+-
+-    mean_kernel[grid](
+-        input_3d,
+-        output_2d,
+-        input_3d.stride(0),
+-        input_3d.stride(1),
+-        input_3d.stride(2),
+-        output_2d.stride(0),
+-        output_2d.stride(1) if output_2d.ndim > 1 else 0,
+-        M,
+-        N,
+-        K,
+-        BLOCK_SIZE,
+-    )
++    if K == 1 and N <= _MAX_VECTORIZED_ROWWISE_BLOCK_SIZE:
++        block_size = _next_power_of_2(N)
++        num_warps = _rowwise_num_warps(block_size)
++        _mean_last_dim_kernel[grid](
++            input_3d,
++            output.reshape(M),
++            input_3d.stride(0),
++            input_3d.stride(1),
++            N,
++            BLOCK_SIZE=block_size,
++            num_warps=num_warps,
++        )
++    else:
++        mean_kernel[grid](
++            input_3d,
++            output_2d,
++            input_3d.stride(0),
++            input_3d.stride(1),
++            input_3d.stride(2),
++            output_2d.stride(0),
++            output_2d.stride(1) if output_2d.ndim > 1 else 0,
++            M,
++            N,
++            K,
++            1024,
++        )
+ 
+     return output
+ 
+@@ -819,6 +917,31 @@ def bmm_batch_invariant(a, b, *, out=None):
+         )
+ 
+ 
++@triton.jit
++def _rms_norm_row_kernel(
++    input_ptr,
++    weight_ptr,
++    output_ptr,
++    input_row_stride: tl.constexpr,
++    output_row_stride: tl.constexpr,
++    n_cols: tl.constexpr,
++    eps,
++    BLOCK_SIZE: tl.constexpr,
++):
++    row_idx = tl.program_id(0).to(tl.int64)
++    offsets = tl.arange(0, BLOCK_SIZE)
++    mask = offsets < n_cols
++    input_row = input_ptr + row_idx * input_row_stride
++    output_row = output_ptr + row_idx * output_row_stride
++
++    vals = tl.load(input_row + offsets, mask=mask, other=0.0).to(tl.float32)
++    weight = tl.load(weight_ptr + offsets, mask=mask, other=1.0).to(tl.float32)
++    sum_sq = tl.sum(tl.where(mask, vals * vals, 0.0), axis=0)
++    inv_rms = tl.rsqrt(sum_sq / n_cols + eps)
++    out = vals * inv_rms * weight
++    tl.store(output_row + offsets, out, mask=mask)
++
++
+ @triton.jit
+ def _rms_norm_kernel(
+     input_ptr,
+@@ -902,18 +1025,32 @@ def rms_norm(
+     n_rows, n_cols = input_2d.shape
+ 
+     output = torch.empty_like(input_2d)
+-    BLOCK_SIZE = 1024
+     grid = (n_rows,)
+-    _rms_norm_kernel[grid](
+-        input_2d,
+-        weight,
+-        output,
+-        input_2d.stride(0),
+-        output.stride(0),
+-        n_cols,
+-        eps,
+-        BLOCK_SIZE=BLOCK_SIZE,
+-    )
++    if n_cols <= _MAX_VECTORIZED_ROWWISE_BLOCK_SIZE:
++        block_size = _next_power_of_2(n_cols)
++        num_warps = _rowwise_num_warps(block_size)
++        _rms_norm_row_kernel[grid](
++            input_2d,
++            weight,
++            output,
++            input_2d.stride(0),
++            output.stride(0),
++            n_cols,
++            eps,
++            BLOCK_SIZE=block_size,
++            num_warps=num_warps,
++        )
++    else:
++        _rms_norm_kernel[grid](
++            input_2d,
++            weight,
++            output,
++            input_2d.stride(0),
++            output.stride(0),
++            n_cols,
++            eps,
++            BLOCK_SIZE=1024,
++        )
+     return output.reshape(original_shape)
+ 
+ 
